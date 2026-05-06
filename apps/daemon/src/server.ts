@@ -1309,6 +1309,46 @@ export function createSseResponse(
   };
 }
 
+const ALLOWED_ORIGINS_ENV = 'OD_ALLOWED_ORIGINS';
+
+function parseAllowedOriginsEnv() {
+  const raw = process.env[ALLOWED_ORIGINS_ENV];
+  if (!raw) return [];
+  return raw
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .map((value) => {
+      try {
+        const url = new URL(value);
+        if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+        return url;
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean);
+}
+
+function allowedHostVariants(url) {
+  const out = new Set();
+  if (url.host) out.add(url.host);
+  if (url.hostname) {
+    out.add(url.hostname);
+    if (!url.port) {
+      out.add(`${url.hostname}:80`);
+      out.add(`${url.hostname}:443`);
+    }
+  }
+  return Array.from(out);
+}
+
+const EXTRA_ALLOWED_ORIGINS = parseAllowedOriginsEnv();
+const EXTRA_ALLOWED_ORIGIN_STRINGS = new Set(EXTRA_ALLOWED_ORIGINS.map((url) => url.origin));
+const EXTRA_ALLOWED_HOSTS = new Set(
+  EXTRA_ALLOWED_ORIGINS.flatMap((url) => allowedHostVariants(url)),
+);
+
 export async function startServer({ port = 7456, host = process.env.OD_BIND_HOST || '127.0.0.1', returnServer = false } = {}) {
   let resolvedPort = port;
   const app = express();
@@ -1324,7 +1364,7 @@ export async function startServer({ port = 7456, host = process.env.OD_BIND_HOST
     if (webPort && webPort !== resolvedPort) ports.push(webPort);
     const schemes = ['http', 'https'];
     const loopbackHosts = ['127.0.0.1', 'localhost', '[::1]'];
-    return new Set(
+    const base = new Set(
       ports.flatMap((p) => [
         ...schemes.flatMap((s) => loopbackHosts.map((h) => `${s}://${h}:${p}`)),
         // When bound to a specific non-loopback address (e.g. Tailscale,
@@ -1333,6 +1373,8 @@ export async function startServer({ port = 7456, host = process.env.OD_BIND_HOST
         ...schemes.map((s) => `${s}://${host}:${p}`),
       ]),
     );
+    for (const origin of EXTRA_ALLOWED_ORIGIN_STRINGS) base.add(origin);
+    return base;
   }
 
   // Routes that serve content to sandboxed iframes (Origin: null) for
@@ -4946,6 +4988,7 @@ export function isLocalSameOrigin(req, port) {
       `${bindHost}:${p}`,
     ]),
   );
+  for (const extraHost of EXTRA_ALLOWED_HOSTS) allowedHosts.add(extraHost);
 
   // Reject unknown Host first (DNS rebinding / Host header attack)
   if (!allowedHosts.has(host)) return false;
@@ -4960,5 +5003,6 @@ export function isLocalSameOrigin(req, port) {
       ...schemes.map((s) => `${s}://${bindHost}:${p}`),
     ]),
   );
+  for (const extraOrigin of EXTRA_ALLOWED_ORIGIN_STRINGS) allowedOrigins.add(extraOrigin);
   return allowedOrigins.has(String(origin));
 }
